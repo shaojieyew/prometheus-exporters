@@ -67,7 +67,7 @@ object YarnStatusExporter {
         app = jsonApp.focus
 
         if (app.isDefined) {
-          val name = jsonApp.get[String]("name").getOrElse("")
+          val name = jsonApp.get[String]("name").right.getOrElse("")
           if (name.length > 0) {
             runningList += (name -> (runningList.get(name).getOrElse(0) + 1))
           }
