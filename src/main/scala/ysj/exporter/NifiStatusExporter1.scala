@@ -1,19 +1,17 @@
-package exporter
+package scala.ysj.exporter
 
-import http.HttpClient
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.FileSystem
-import org.apache.hadoop.fs.Path
 import io.prometheus.client.Gauge
 import io.prometheus.client.exporter.MetricsServlet
-import nifi.entity.NifiProcessorStatus
-import nifi.{ NifiApiCaller, NifiProcessorGraphBuilder, NifiProcessorType, NifiProvenanceQuery }
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.eclipse.jetty.server.Server
-import org.eclipse.jetty.servlet.{ ServletContextHandler, ServletHolder }
+import org.eclipse.jetty.servlet.{ServletContextHandler, ServletHolder}
 import org.json.simple.JSONObject
 import org.json.simple.parser.JSONParser
+import ysj.nifi.entity.NifiProcessorStatus
+import ysj.nifi.{NifiApiCaller, NifiProcessorGraphBuilder, NifiProcessorType}
 
-object NifiStatusExporter {
+object NifiStatusExporter1 {
   val latencyGauge = Gauge
     .build()
     .name("nifi_flow_latency")
@@ -28,6 +26,14 @@ object NifiStatusExporter {
     .help("input folder's backlog")
     .labelNames(
       Array("process_group", "process_group_id", "processor_name", "id"): _*
+    )
+    .register()
+  val congestionGuage = Gauge
+    .build()
+    .name("nifi_flow_congestion")
+    .help("nifi congestion rate")
+    .labelNames(
+      Array("process_group", "process_group_id"): _*
     )
     .register()
   val flowRunStateGauge = Gauge
@@ -81,7 +87,7 @@ object NifiStatusExporter {
       }
     }).start()
 
-    import nifi.JSONFunctions._
+    import ysj.nifi.JSONFunctions._
     while (true) {
       val token = ""
       val str   = NifiApiCaller.getClusterSummary(url, token)
@@ -99,16 +105,25 @@ object NifiStatusExporter {
       }
 
       val processChains = NifiProcessorGraphBuilder.getGraph(mainProcessGroupId, url).flattenGraph()
+      processChains.printFlattenedFlow()
       processChains
         .foreach(
           processChain => {
             // start of export backlog
             // exportEtaBacklog(processChain, url)
             // end of export backlog
-
+            var congestionRate = 0L
             var processorOrderIndex = 1;
             var running             = true
             processChain.foreach(processor => {
+
+              if (processor.componentType.equals(NifiProcessorType.FLOW_CONNECTION)) {
+                if(processor.status.isDefined && congestionRate<processor.status.get.percentUseCount.get){
+                  congestionRate=processor.status.get.percentUseCount.get
+                }
+              }
+
+
               if (processor.componentType.equals(NifiProcessorType.FLOW_PROCESS)) {
                 // start of export latency
                 exportLatency(processor, processChain, processorOrderIndex, url, token)
@@ -194,7 +209,12 @@ object NifiStatusExporter {
                 processorOrderIndex += 1
               }
             })
-
+            congestionGuage
+              .labels(
+                processChain.head.group.get.name,
+                processChain.head.group.get.id
+              )
+              .set(congestionRate)
           }
         )
       Thread.sleep(crawlInterval)
@@ -218,16 +238,14 @@ object NifiStatusExporter {
       if (list_processor.length > 0 && fetch_processor.length > 0) {
         val str = NifiApiCaller.getProcess(domain, list_processor.head.id)
 
+        import ysj.nifi.JSONFunctions._
         // println(PROCESS_URL.format(host, list_processor.head.id))
         val properties = new JSONParser()
           .parse(str)
           .asInstanceOf[JSONObject]
-          .get("component")
-          .asInstanceOf[JSONObject]
-          .get("config")
-          .asInstanceOf[JSONObject]
-          .get("properties")
-          .asInstanceOf[JSONObject]
+          .getJson("component")
+          .getJson("config")
+          .getJson("properties")
         val path = properties
           .get("Input Directory")
           .asInstanceOf[String]
